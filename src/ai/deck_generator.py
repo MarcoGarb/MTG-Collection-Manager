@@ -7,7 +7,78 @@ from src.models.card import Card
 from src.models.deck import Deck, DeckCard
 from src.ai.deck_analyzer import DeckAnalyzer
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, Optional, List, Tuple
 
+# Basic lands mapping for virtual/unlimited creation
+BASIC_LANDS = {
+    'Plains':  {'color': 'W', 'type': 'Basic Land — Plains',  'text': '({T}: Add {W}.)'},
+    'Island':  {'color': 'U', 'type': 'Basic Land — Island',  'text': '({T}: Add {U}.)'},
+    'Swamp':   {'color': 'B', 'type': 'Basic Land — Swamp',   'text': '({T}: Add {B}.)'},
+    'Mountain':{'color': 'R', 'type': 'Basic Land — Mountain','text': '({T}: Add {R}.)'},
+    'Forest':  {'color': 'G', 'type': 'Basic Land — Forest',  'text': '({T}: Add {G}.)'},
+    'Wastes':  {'color': 'C', 'type': 'Basic Land — Wastes',  'text': '({T}: Add {C}.)'},
+}
+def _basic_for_color(c: str) -> str:
+    m = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest', 'C': 'Wastes'}
+    return m.get(c.upper(), 'Wastes')
+def _make_basic_land(name: str) -> Card:
+    info = BASIC_LANDS[name]
+    # Virtual Card; negative id helps distinguish from DB ids
+    return Card(
+        id=-ord(name[0]),
+        name=name,
+        set_code='BASIC',
+        collector_number='0',
+        rarity='common',
+        mana_cost='',
+        cmc=0.0,
+        colors=info['color'],
+        color_identity=info['color'],
+        type_line=info['type'],
+        card_types='Land,Basic',
+        subtypes=name,
+        oracle_text=info['text'],
+        quantity=999
+    )
+def _count_color_pips(deck: Deck) -> dict:
+    """Count colored mana symbols in nonland mana costs to guide basic-land mix."""
+    counts = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0}
+    for dc in deck.get_mainboard_cards():
+        if dc.card.is_land():
+            continue
+        cost = dc.card.mana_cost or ''
+        q = dc.quantity
+        for c in counts.keys():
+            counts[c] += cost.count(f'{{{c}}}') * q
+            # Include hybrid symbols both sides
+            counts[c] += cost.count(f'{c}/') * q
+            counts[c] += cost.count(f'/{c}') * q
+    return counts
+def _target_land_count(fmt: str, archetype: str, deck_size: int) -> int:
+    """Reasonable targets. We don't trust the template's 'lands' raw value."""
+    fmt = (fmt or '').lower()
+    if fmt == 'commander':
+        return 37  # common default (can vary 35–40)
+    baseline = {
+        'aggro': 20,
+        'midrange': 24,
+        'control': 26,
+        'combo': 24,
+        'tribal': 24,
+    }.get(archetype, 24)
+    # Scale for non-60 sizes just in case
+    return max(16, round(baseline * (deck_size / 60.0)))
+def _color_mix_from_pips(pips: dict, colors: list) -> dict:
+    """Return proportions per color from pip counts; fallback to even split."""
+    active = [c for c in (colors or []) if c in 'WUBRG']
+    if not active:
+        return {}
+    total = sum(pips.get(c, 0) for c in active)
+    if total == 0:
+        # Even split if no pips found
+        return {c: 1.0 / len(active) for c in active}
+    return {c: (pips.get(c, 0) / total) for c in active}
 
 class DeckGenerator:
     """Generate optimized decks using genetic algorithm."""
@@ -41,12 +112,20 @@ class DeckGenerator:
             'creatures': 0.25,
             'removal': 0.10,
             'other': 0.45,
-        }
+        },
+        'tribal': {
+        'curve': {1: 6, 2: 10, 3: 12, 4: 8, 5: 4, 6: 2},
+        'lands': 24,
+        'creatures': 0.55,
+        'removal': 0.15,
+        'other': 0.15,
+    },
     }
     
     def __init__(self, collection: List[Card]):
         self.collection = collection
         self.analyzer = DeckAnalyzer()
+        self._target_tribe: Optional[str] = None  # NEW
     
     
     def _filter_by_colors(self, colors: List[str]) -> List[Card]:
@@ -87,47 +166,75 @@ class DeckGenerator:
         colors: List[str] = None,
         deck_size: int = 60,
         commander: Optional[Card] = None,
-        auto_select_commander: bool = True
+        auto_select_commander: bool = True,
+        tribe: Optional[str] = None,
+        availability_ledger: Optional[Dict[int, int]] = None,
+        current_deck_id: Optional[int] = None
     ) -> Deck:
-        """Generate a deck using genetic algorithm."""
-    
+        """Generate a deck using a genetic algorithm."""
         print(f"🔍 Starting deck generation: {archetype} in {format}")
-    
+
         # Validate archetype
         if archetype not in self.ARCHETYPE_TEMPLATES:
             raise ValueError(f"Unknown archetype: {archetype}")
-    
+
         # Default colors
         if colors is None:
             colors = ['R']
-    
         print(f"🔍 Colors: {colors}")
-    
-        # Handle Commander format
+
+        # Tribal target
+        self._target_tribe = None
+        if archetype == 'tribal' and isinstance(tribe, str) and tribe.strip():
+            self._target_tribe = tribe.strip().lower()
+
+        # 1) Filter the collection by colors first so valid_cards exists
+        valid_cards = self._filter_by_colors(colors)
+
+        # If tribal, reorder/favor tribe hits in the pool
+        if self._target_tribe:
+            def is_tribal(c: Card) -> bool:
+                tl = (c.type_line or '').lower()
+                tx = (c.oracle_text or '').lower()
+                t = self._target_tribe
+                return (t in tl) or (t in tx)
+            tribal_first = [c for c in valid_cards if is_tribal(c)]
+            others = [c for c in valid_cards if c not in tribal_first]
+            valid_cards = tribal_first + others
+
+        print(f"🔍 Filtered to {len(valid_cards)} valid cards")
+        if not valid_cards:
+            raise ValueError(f"No cards found for colors: {colors}")
+
+        # 2) Optional availability filter (keep basics unlimited)
+        if availability_ledger:
+            before = len(valid_cards)
+            valid_cards = [
+                c for c in valid_cards
+                if ('Basic Land' in (c.type_line or ''))
+                or availability_ledger.get(getattr(c, 'id', None), 0) > 0
+            ]
+            print(f"🔍 Availability filter: {before} -> {len(valid_cards)}")
+
+        # 3) Commander handling AFTER valid_cards is set (fixes NameError)
         if format.lower() == 'commander':
-            deck_size = 99  # Commander is the 100th card
-            print(f"🔍 Commander format detected, deck_size={deck_size}")
-        
-            # Auto-select commander if not provided
+            deck_size = 99
             if commander is None and auto_select_commander:
-                valid_cards = self._filter_by_colors(colors)
                 suitable_commanders = self._find_suitable_commanders(valid_cards, colors)
-            
+                # Respect availability for commander choice
+                if availability_ledger:
+                    suitable_commanders = [
+                        c for c in suitable_commanders
+                        if availability_ledger.get(getattr(c, 'id', None), 0) > 0
+                    ]
                 if suitable_commanders:
                     commander = random.choice(suitable_commanders)
                     print(f"🎯 Auto-selected commander: {commander.name}")
                 else:
-                    print("⚠️ No suitable commander found")
-    
-        # Filter collection by colors
-        valid_cards = self._filter_by_colors(colors)
-        print(f"🔍 Filtered to {len(valid_cards)} valid cards")
-    
-        if not valid_cards:
-            raise ValueError(f"No cards found for colors: {colors}")
-    
-        # Run genetic algorithm
-        print(f"🧬 Running genetic algorithm...")
+                    print("⚠️ No suitable commander found with availability")
+
+        # 4) Run GA on the properly prepared pool
+        print("🧬 Running genetic algorithm...")
         best_deck = self._genetic_algorithm(
             valid_cards,
             archetype,
@@ -135,23 +242,31 @@ class DeckGenerator:
             format,
             commander
         )
-    
-        # Safety check
         if best_deck is None:
             raise ValueError("Genetic algorithm returned None!")
-    
+
         print(f"✅ Generated deck: {best_deck.name}")
-    
-        # Enforce singleton for commander format
+
+        # 5) Commander-specific enforcement
         if format.lower() == 'commander':
-            print(f"🔍 Enforcing singleton rule...")
+            print("🔍 Enforcing singleton rule...")
             best_deck = self._enforce_singleton(best_deck)
-    
-        # Update deck metadata
+            if availability_ledger:
+                best_deck = self._enforce_availability(
+                    best_deck, availability_ledger, format=format, colors=colors
+                )
+            # FINAL land clamp and keep body at 99
+            best_deck = self._cap_commander_lands(best_deck, valid_cards, min_lands=35, max_lands=40)
+
+        # 6) Ensure a sensible land base EVEN IF collection lacked basics (this was unreachable before)
+        try:
+            self._ensure_land_base(best_deck, colors or [], format, archetype, deck_size)
+        except Exception:
+            # Never let land-base adjustment break generation
+            pass
+
         best_deck.update_colors()
         best_deck.date_modified = datetime.now().isoformat()
-    
-        print(f"✅ Deck generation complete!")
         return best_deck
 
     def _find_suitable_commanders(self, card_pool: List[Card], colors: List[str]) -> List[Card]:
@@ -264,6 +379,96 @@ class DeckGenerator:
     
         return deck
     
+    def _cap_commander_lands(self, deck: Deck, card_pool: List[Card], min_lands: int = 35, max_lands: int = 40) -> Deck:
+        """Clamp Commander land count into [min_lands, max_lands] and keep mainboard at 99 (excl. commander)."""
+        is_commander = deck.format.lower() == 'commander'
+        if not is_commander:
+            return deck
+
+        main = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+        body_size = 99
+        land_dcs = [dc for dc in main if dc.card.is_land()]
+        nonland_dcs = [dc for dc in main if not dc.card.is_land()]
+
+        land_count = sum(dc.quantity for dc in land_dcs)
+        nonland_count = sum(dc.quantity for dc in nonland_dcs)
+
+        # Step 1: If too many lands, trim basics first then nonbasics
+        if land_count > max_lands:
+            excess = land_count - max_lands
+
+            # Trim basics first (highest quantities first)
+            basics = [dc for dc in land_dcs if 'Basic Land' in (dc.card.type_line or '')]
+            basics.sort(key=lambda dc: dc.quantity, reverse=True)
+            for dc in basics:
+                if excess <= 0:
+                    break
+                reducible = min(excess, dc.quantity - 1)  # keep at least 1 copy of that basic
+                if reducible > 0:
+                    deck.remove_card(dc.card, quantity=reducible)
+                    excess -= reducible
+                    land_count -= reducible
+
+            # If still too many lands, remove some nonbasics (singleton)
+            if excess > 0:
+                for dc in [d for d in land_dcs if 'Basic Land' not in (d.card.type_line or '')]:
+                    if excess <= 0:
+                        break
+                    deck.remove_card(dc.card, quantity=1)
+                    excess -= 1
+                    land_count -= 1
+
+        # Step 2: If too few lands and we have room, add basics to min_lands
+        main = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+        current_body = sum(dc.quantity for dc in main)
+        if land_count < min_lands and current_body < body_size:
+            to_add = min(min_lands - land_count, body_size - current_body)
+            colors = deck.get_colors() or []
+            if not colors:
+                colors = ['C']  # colorless fallback
+
+            # Even distribution among deck colors
+            per = max(1, to_add // max(1, len(colors)))
+            remaining = to_add
+            for i, c in enumerate(colors):
+                if remaining <= 0:
+                    break
+                add = per if i < len(colors) - 1 else remaining
+                name = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}.get(c, 'Wastes')
+                basic = Card(
+                    id=-ord(name[0]), name=name, set_code='BASIC', collector_number='0',
+                    rarity='common', mana_cost='', cmc=0.0, colors=c if c != 'C' else '',
+                    color_identity=c if c != 'C' else '', type_line=f'Basic Land — {name}',
+                    card_types='Land,Basic', subtypes=name, oracle_text=f'({{T}}: Add {{{c}}}.)' if c != 'C' else '({T}: Add {C}.)',
+                    quantity=999
+                )
+                deck.add_card(basic, quantity=add)
+                remaining -= add
+            land_dcs = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander and dc.card.is_land()]
+            land_count = sum(dc.quantity for dc in land_dcs)
+
+        # Step 3: After trims, backfill to 99 with nonlands
+        main = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+        current_body = sum(dc.quantity for dc in main)
+        if current_body < body_size:
+            need = body_size - current_body
+            added_ids = {dc.card.id for dc in main}
+            # prefer nonlands not already in deck
+            for card in card_pool:
+                if need <= 0:
+                    break
+                if card.is_land():
+                    continue
+                if card.id in added_ids:
+                    continue
+                deck.add_card(card, quantity=1)
+                added_ids.add(card.id)
+                need -= 1
+
+            # If pool exhausted, no-op; we stay <= 99 gracefully.
+
+        return deck
+    
     def _genetic_algorithm(
         self,
         card_pool: List[Card],
@@ -357,78 +562,117 @@ class DeckGenerator:
         format: str,
         commander: Optional[Card]
     ) -> Deck:
-        """Create a random deck from card pool following archetype guidelines."""
-    
+        """Create a random deck from card pool following archetype guidelines (fixed land math)."""
+        import random
+
         deck = Deck(
             name=f"{archetype.title()} Deck",
             format=format,
             description=f"AI-generated {archetype} deck"
         )
-    
-        # Add commander first if provided
+
+        # Commander occupies a separate slot; deck_size here is non-commander body size
+        is_commander = format.lower() == 'commander'
         if commander:
             deck.add_card(commander, quantity=1, is_commander=True)
-    
-        # Get archetype template
+
         template = self.ARCHETYPE_TEMPLATES[archetype]
-    
-        # Separate lands from nonlands
+
+        # Target land counts (absolute, not ratio)
+        if is_commander:
+            target_lands = 37  # common default; we also cap later
+            target_lands = min(target_lands, deck_size)  # safety
+        else:
+            target_lands = min(int(template['lands']), deck_size)
+
+        target_nonlands = max(0, deck_size - target_lands)
+
+        # Split pool
         lands = [c for c in card_pool if c.is_land()]
         nonlands = [c for c in card_pool if not c.is_land()]
-    
-        # Calculate target counts
-        target_lands = int(deck_size * template['lands'])
-        target_nonlands = deck_size - target_lands
-    
-        # For commander format (singleton), each card is quantity 1
-        is_singleton = format.lower() == 'commander'
-    
-        # Add nonland cards
+
+        # Add nonlands first
         random.shuffle(nonlands)
         added_nonlands = 0
         for card in nonlands:
             if added_nonlands >= target_nonlands:
                 break
-            qty = 1 if is_singleton else random.randint(1, 4)
+            qty = 1 if is_commander else random.randint(1, 4)
             qty = min(qty, target_nonlands - added_nonlands)
+            if qty <= 0:
+                continue
+
+            if is_commander and any(dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander):
+                continue  # singleton
             deck.add_card(card, quantity=qty)
             added_nonlands += qty
-    
-        # Add land cards
+
+        # Add lands (singleton for nonbasic in Commander; basics can be >1)
         random.shuffle(lands)
         added_lands = 0
         for card in lands:
             if added_lands >= target_lands:
                 break
-        
-            # Basic lands can be multiple copies even in Commander
-            is_basic = card.type_line and 'Basic Land' in card.type_line
-        
-            if is_singleton and not is_basic:
-                qty = 1
-            else:
-                qty = random.randint(3, 8) if is_basic else random.randint(1, 4)
-        
+            is_basic = ('Basic Land' in (card.type_line or ''))
+
+            qty = 1 if (is_commander and not is_basic) else (random.randint(3, 8) if is_basic else random.randint(1, 4))
             qty = min(qty, target_lands - added_lands)
+            if qty <= 0:
+                continue
+
+            if is_commander and not is_basic:
+                # enforce singleton
+                if any(dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander):
+                    continue
+                qty = 1
+
             deck.add_card(card, quantity=qty)
             added_lands += qty
-    
-        # Fill remaining slots if needed
+
+        # Fill remaining to body size (prefer nonlands to avoid land bloat)
         current_size = sum(dc.quantity for dc in deck.get_mainboard_cards() if not dc.is_commander)
-    
-        if current_size < deck_size:
-            print(f"⚠️ Deck undersized ({current_size}/{deck_size}), filling...")
-            added_ids = {dc.card.id for dc in deck.cards}
-        
-            for card in card_pool:
-                if current_size >= deck_size:
+        remaining = deck_size - current_size
+
+        if remaining > 0:
+            # Prefer nonlands
+            for card in nonlands:
+                if remaining <= 0:
                     break
-                if card.id not in added_ids:
-                    qty = 1 if is_singleton else min(2, deck_size - current_size)
+                if is_commander and any(dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander):
+                    continue
+                qty = 1 if is_commander else min(2, remaining)
+                deck.add_card(card, quantity=qty)
+                remaining -= qty
+
+            # Absolute last resort: use lands to fill (clamped by remaining)
+            if remaining > 0:
+                for card in lands:
+                    if remaining <= 0:
+                        break
+                    is_basic = ('Basic Land' in (card.type_line or ''))
+                    if is_commander and not is_basic and any(
+                        dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander
+                    ):
+                        continue
+                    qty = 1 if (is_commander and not is_basic) else min(2, remaining)
                     deck.add_card(card, quantity=qty)
-                    added_ids.add(card.id)
-                    current_size += qty
-    
+                    remaining -= qty
+
+        # Ensure we never exceed body size
+        main = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+        total_mb = sum(dc.quantity for dc in main)
+        if total_mb > deck_size:
+            excess = total_mb - deck_size
+            # Trim lands first (prefer trimming basics)
+            for dc in sorted((d for d in main if d.card.is_land()),
+                            key=lambda d: 0 if 'Basic Land' in (d.card.type_line or '') else 1):
+                if excess <= 0:
+                    break
+                reducible = min(excess, dc.quantity - (1 if is_commander and 'Basic Land' in (dc.card.type_line or '') else 0))
+                if reducible > 0:
+                    deck.remove_card(dc.card, quantity=reducible)
+                    excess -= reducible
+
         return deck
     
     def _evaluate_deck(self, deck: Deck, archetype: str) -> float:
@@ -472,6 +716,18 @@ class DeckGenerator:
             max_theme_count = max(themes.values())
             synergy_score = min(30, max_theme_count * 2)
             score += synergy_score
+
+        # Tribal synergy bonus if requested
+        if getattr(self, '_target_tribe', None):
+            tribe = self._target_tribe
+            tribal_count = 0
+            for dc in deck.get_mainboard_cards():
+                tl = (dc.card.type_line or '').lower()
+                tx = (dc.card.oracle_text or '').lower()
+                if tribe in tl or tribe in tx:
+                    tribal_count += dc.quantity
+            # Reward focused tribal presence, capped
+            score += min(30, tribal_count * 1.5)
         
         # Interaction scoring based on archetype
         removal_count = analysis['removal_count']
@@ -566,4 +822,151 @@ class DeckGenerator:
                 qty = min(random.randint(1, 3), remove_dc.quantity)
                 deck.add_card(new_card, quantity=qty)
     
+        return deck
+    
+    def _ensure_land_base(self, deck: Deck, colors: List[str], fmt: str, archetype: str, deck_size: int):
+        """Add/adjust basic lands to hit target land count, even if none in collection."""
+        target = _target_land_count(fmt, archetype, deck_size)
+        mainboard = deck.get_mainboard_cards()
+        land_count = sum(dc.quantity for dc in mainboard if dc.card.is_land())
+        need = max(0, target - land_count)
+        if need == 0 and sum(dc.quantity for dc in mainboard if not dc.is_commander) == deck_size:
+            return
+        # If we need to add lands but deck is already full, free slots from the end (nonlands)
+        current_size = sum(dc.quantity for dc in mainboard if not dc.is_commander)
+        if current_size + need > deck_size:
+            to_remove = min(need, (current_size + need) - deck_size)
+            # Remove from nonlands one by one
+            for dc in list(reversed(mainboard)):
+                if to_remove <= 0: break
+                if dc.card.is_land() or dc.is_commander: continue
+                remove_now = min(dc.quantity, to_remove)
+                deck.remove_card(dc.card, quantity=remove_now, from_sideboard=False)
+                to_remove -= remove_now
+        # Recompute remaining slots and need
+        mainboard = deck.get_mainboard_cards()
+        land_count = sum(dc.quantity for dc in mainboard if dc.card.is_land())
+        current_size = sum(dc.quantity for dc in mainboard if not dc.is_commander)
+        need = min(target - land_count, max(0, deck_size - current_size))
+        if need <= 0:
+            return
+        # Compute colored pip mix → basic mix
+        pips = _count_color_pips(deck)
+        mix = _color_mix_from_pips(pips, colors)
+        if not mix:
+            # Fallback: even split by deck colors, else default to one colorless
+            if colors:
+                even = 1.0 / len(colors)
+                mix = {c: even for c in colors}
+            else:
+                mix = {'C': 1.0}
+        # Allocate counts per color
+        allocations = {}
+        remaining = need
+        for i, (c, prop) in enumerate(mix.items()):
+            count = int(round(prop * need))
+            if i == len(mix) - 1:
+                count = remaining  # force total to match
+            allocations[c] = max(0, count)
+            remaining -= allocations[c]
+        # Add basics according to allocation
+        for c, cnt in allocations.items():
+            if cnt <= 0: continue
+            name = _basic_for_color(c)
+            basic = _make_basic_land(name)
+            deck.add_card(basic, quantity=cnt)
+    
+    def _is_basic_land(self, card: Card) -> bool:
+        return bool(card.type_line and 'Basic Land' in card.type_line)
+    def _basic_for_color(self, color: str) -> str:
+        return {
+            'W': 'Plains',
+            'U': 'Island',
+            'B': 'Swamp',
+            'R': 'Mountain',
+            'G': 'Forest'
+        }.get(color, 'Wastes')
+    def _add_basic_lands(self, deck: Deck, count: int, colors: List[str]) -> None:
+        if not colors:
+            colors = ['C']
+        # Spread basics across colors roughly evenly
+        per_color = max(1, count // max(1, len(colors)))
+        remaining = count
+        for c in colors:
+            if remaining <= 0: break
+            to_add = min(per_color, remaining)
+            name = self._basic_for_color(c)
+            # find an actual card object in collection or synthesize a virtual basic
+            basics = [card for card in self.collection
+                    if card.name == name and self._is_basic_land(card)]
+            if basics:
+                deck.add_card(basics[0], quantity=to_add)
+            else:
+                # last-resort virtual basic; your codebase already supports virtual basics elsewhere
+                deck.add_card(Card(name=name, type_line=f"Basic Land — {name}",
+                                colors='', color_identity=c, mana_cost='', cmc=0.0, quantity=999, id=-hash(name)),
+                            quantity=to_add)
+            remaining -= to_add
+        # Any remainder -> dump into first color
+        if remaining > 0:
+            name = self._basic_for_color(colors[0])
+            basics = [card for card in self.collection
+                    if card.name == name and self._is_basic_land(card)]
+            if basics:
+                deck.add_card(basics[0], quantity=remaining)
+            else:
+                deck.add_card(Card(name=name, type_line=f"Basic Land — {name}",
+                                colors='', color_identity=colors[0], mana_cost='', cmc=0.0, quantity=999, id=-hash(name)),
+                            quantity=remaining)
+    def _enforce_availability(self, deck: Deck, ledger: Dict[int,int], format: str, colors: List[str]) -> Deck:
+        """
+        Clamp deck to not exceed availability_ledger.
+        Non-basic cards:
+        - Commander: drop if ledger <= 0 (singleton already applied)
+        - Other formats: cap quantity to remaining ledger
+        Fill shortages with basics (safe and unlimited).
+        """
+        is_commander = format.lower() == 'commander'
+        # Count current mainboard size (excluding commander)
+        commander_dc = deck.get_commander()
+        mainboard = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+        target = 99 if is_commander else sum(dc.quantity for dc in mainboard)  # keep size for non-commander
+        pruned: List[DeckCard] = []
+        used_local: Dict[int,int] = {}
+        for dc in mainboard:
+            card = dc.card
+            if self._is_basic_land(card):
+                pruned.append(dc)
+                continue
+            cid = getattr(card, 'id', None)
+            allowed = ledger.get(cid, 0)
+            taken = used_local.get(cid, 0)
+            if is_commander:
+                # already singleton; require at least 1 availability
+                if allowed - taken >= 1:
+                    pruned.append(DeckCard(card=card, quantity=1))
+                    used_local[cid] = taken + 1
+                else:
+                    print(f"⛔ Removing unavailable card: {card.name}")
+            else:
+                # cap to min(requested, remaining)
+                cap = max(0, allowed - taken)
+                new_qty = min(dc.quantity, cap)
+                if new_qty > 0:
+                    pruned.append(DeckCard(card=card, quantity=new_qty))
+                    used_local[cid] = taken + new_qty
+                else:
+                    print(f"⛔ Removing unavailable card: {card.name}")
+        # Rebuild deck with pruned non-commander mainboard
+        deck.cards = []
+        if commander_dc:
+            deck.cards.append(DeckCard(card=commander_dc.card, quantity=1, is_commander=True))
+        for dc in pruned:
+            deck.cards.append(dc)
+        # Fill any shortage with basic lands
+        current_size = sum(dc.quantity for dc in deck.get_mainboard_cards() if not dc.is_commander)
+        if is_commander and current_size < target:
+            shortage = target - current_size
+            print(f"🧩 Filling commander shortage with basics: {shortage}")
+            self._add_basic_lands(deck, shortage, colors or deck.get_colors())
         return deck

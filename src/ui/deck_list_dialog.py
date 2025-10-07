@@ -38,7 +38,7 @@ class DeckListDialog(QDialog):
         self.deck_table.setHorizontalHeaderLabels(["Name", "Format", "Colors", "Cards", "Modified"])
         self.deck_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.deck_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.deck_table.cellDoubleClicked.connect(self.edit_deck)
+        self.deck_table.cellDoubleClicked.connect(lambda r, c: self.edit_deck())
         
         header = self.deck_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -49,34 +49,22 @@ class DeckListDialog(QDialog):
         
         # Buttons
         button_layout = QHBoxLayout()
-        
         new_btn = QPushButton("New Deck")
         new_btn.clicked.connect(self.new_deck)
         button_layout.addWidget(new_btn)
-        
         import_btn = QPushButton("Import Deck")
         import_btn.clicked.connect(self.import_deck)
         button_layout.addWidget(import_btn)
-    
         edit_btn = QPushButton("Edit Selected")
         edit_btn.clicked.connect(self.edit_deck)
         button_layout.addWidget(edit_btn)
-    
-
-        edit_btn = QPushButton("Edit Selected")
-        edit_btn.clicked.connect(self.edit_deck)
-        button_layout.addWidget(edit_btn)
-        
         delete_btn = QPushButton("Delete Selected")
         delete_btn.clicked.connect(self.delete_deck)
         button_layout.addWidget(delete_btn)
-        
         button_layout.addStretch()
-        
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         button_layout.addWidget(close_btn)
-        
         layout.addLayout(button_layout)
     
     def load_decks(self):

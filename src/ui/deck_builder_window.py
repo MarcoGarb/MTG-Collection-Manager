@@ -19,6 +19,148 @@ from src.ui.widgets.card_image_widget import CardImageWidget
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QEvent
 from src.ui.widgets.card_preview_popup import CardPreviewPopup
 
+# NEW imports for AI dialog and worker
+from PyQt5.QtWidgets import (
+    QDialog, QDialogButtonBox, QCheckBox, QSpinBox, QProgressDialog
+)
+from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QCheckBox, QSpinBox, QProgressDialog
+from PyQt5.QtCore import QThread, pyqtSignal
+from src.ai.deck_generator import DeckGenerator
+
+
+class AIDeckGeneratorDialog(QDialog):
+    """Dialog to configure AI deck generation."""
+    def __init__(self, parent=None, default_format: str = "standard", default_colors: List[str] = None):
+        super().__init__(parent)
+        from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit
+        self.setWindowTitle("AI Deck Generator")
+        self.setMinimumWidth(480)
+        if default_colors is None:
+            default_colors = []
+        layout = QVBoxLayout(self)
+        # Archetype
+        layout.addWidget(QLabel("Archetype:"))
+        self.archetype_combo = QComboBox()
+        self.archetype_combo.addItems(["aggro", "midrange", "control", "combo", "tribal"])
+        self.archetype_combo.setCurrentText("midrange")
+        layout.addWidget(self.archetype_combo)
+        # Format
+        layout.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["standard", "commander", "modern", "pauper", "legacy", "vintage", "brawl"])
+        self.format_combo.setCurrentText(default_format or "standard")
+        layout.addWidget(self.format_combo)
+        # Colors
+        layout.addWidget(QLabel("Colors:"))
+        colors_row = QHBoxLayout()
+        self.chk_W = QCheckBox("W"); colors_row.addWidget(self.chk_W)
+        self.chk_U = QCheckBox("U"); colors_row.addWidget(self.chk_U)
+        self.chk_B = QCheckBox("B"); colors_row.addWidget(self.chk_B)
+        self.chk_R = QCheckBox("R"); colors_row.addWidget(self.chk_R)
+        self.chk_G = QCheckBox("G"); colors_row.addWidget(self.chk_G)
+        layout.addLayout(colors_row)
+        for c in default_colors:
+            if c == "W": self.chk_W.setChecked(True)
+            if c == "U": self.chk_U.setChecked(True)
+            if c == "B": self.chk_B.setChecked(True)
+            if c == "R": self.chk_R.setChecked(True)
+            if c == "G": self.chk_G.setChecked(True)
+        # Tribe (only for tribal archetype)
+        self.tribe_row = QHBoxLayout()
+        self.tribe_label = QLabel("Tribe:")
+        self.tribe_combo = QComboBox()
+        self.tribe_combo.setEditable(True)
+        # Common tribes; user can type any
+        self.tribe_combo.addItems([
+            "", "elf", "goblin", "zombie", "vampire", "human", "dragon",
+            "wizard", "knight", "soldier", "merfolk", "angel", "demon", "sliver",
+            "cat", "cleric", "rogue", "warrior", "ally", "shaman"
+        ])
+        self.tribe_row.addWidget(self.tribe_label)
+        self.tribe_row.addWidget(self.tribe_combo)
+        layout.addLayout(self.tribe_row)
+        def update_tribe_visibility():
+            is_tribal = (self.archetype_combo.currentText().lower() == "tribal")
+            self.tribe_label.setVisible(is_tribal)
+            self.tribe_combo.setVisible(is_tribal)
+        self.archetype_combo.currentTextChanged.connect(lambda _: update_tribe_visibility())
+        update_tribe_visibility()
+        # Deck size
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Deck size:"))
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(40, 200)
+        self.size_spin.setValue(60)
+        size_row.addWidget(self.size_spin)
+        layout.addLayout(size_row)
+        # Commander option
+        self.auto_commander = QCheckBox("Auto-select commander (Commander only)")
+        self.auto_commander.setChecked(True)
+        layout.addWidget(self.auto_commander)
+        def on_format_changed(fmt: str):
+            self.size_spin.setEnabled(fmt.lower() != "commander")
+        self.format_combo.currentTextChanged.connect(on_format_changed)
+        on_format_changed(self.format_combo.currentText())
+        # Buttons
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+    def get_values(self):
+        colors = []
+        if self.chk_W.isChecked(): colors.append("W")
+        if self.chk_U.isChecked(): colors.append("U")
+        if self.chk_B.isChecked(): colors.append("B")
+        if self.chk_R.isChecked(): colors.append("R")
+        if self.chk_G.isChecked(): colors.append("G")
+        tribe = self.tribe_combo.currentText().strip().lower()
+        if tribe == "": tribe = None
+        return {
+            "archetype": self.archetype_combo.currentText(),
+            "format": self.format_combo.currentText(),
+            "colors": colors,
+            "deck_size": self.size_spin.value(),
+            "auto_select_commander": self.auto_commander.isChecked(),
+            "tribe": tribe,
+        }
+class DeckGenWorker(QThread):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    def __init__(self, collection, archetype, fmt, colors, deck_size, auto_select_commander, tribe=None):
+        super().__init__()
+        self.collection = collection
+        self.archetype = archetype
+        self.fmt = fmt
+        self.colors = colors
+        self.deck_size = deck_size
+        self.auto_select_commander = auto_select_commander
+        self.tribe = tribe  # NEW
+    def run(self):
+        try:
+            generator = DeckGenerator(self.collection)
+            if self.fmt.lower() == "commander":
+                deck = generator.generate_deck(
+                    archetype=self.archetype,
+                    format=self.fmt,
+                    colors=self.colors or None,
+                    commander=None,
+                    auto_select_commander=self.auto_select_commander,
+                    tribe=self.tribe,  # NEW
+                )
+            else:
+                deck = generator.generate_deck(
+                    archetype=self.archetype,
+                    format=self.fmt,
+                    colors=self.colors or None,
+                    deck_size=self.deck_size,
+                    commander=None,
+                    auto_select_commander=False,
+                    tribe=self.tribe,  # NEW
+                )
+            self.finished.emit(deck)
+        except Exception as e:
+            self.error.emit(str(e))
+
 BASIC_LANDS = {
     'Plains':   {'colors': 'W', 'type': 'Basic Land - Plains',   'text': '({T}: Add {W}.)'},
     'Island':   {'colors': 'U', 'type': 'Basic Land - Island',   'text': '({T}: Add {U}.)'},
@@ -79,31 +221,28 @@ class DeckBuilderWindow(QMainWindow):
         
         # Action buttons
         button_layout = QHBoxLayout()
-        
         save_btn = QPushButton("💾 Save Deck")
         save_btn.clicked.connect(self.save_deck)
         button_layout.addWidget(save_btn)
-        
         validate_btn = QPushButton("✓ Validate Deck")
         validate_btn.clicked.connect(self.validate_deck)
         button_layout.addWidget(validate_btn)
-        
         export_btn = QPushButton("📄 Export Deck")
         export_btn.clicked.connect(self.export_deck)
         button_layout.addWidget(export_btn)
-
         import_btn = QPushButton("📥 Import Cards")
         import_btn.clicked.connect(self.import_cards_to_deck)
         button_layout.addWidget(import_btn)
-        
+        # NEW: AI Generate button
+        ai_btn = QPushButton("🤖 Generate (AI)")
+        ai_btn.clicked.connect(self.open_ai_generator)
+        button_layout.addWidget(ai_btn)
         button_layout.addStretch()
-        
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         button_layout.addWidget(close_btn)
-        
         main_layout.addLayout(button_layout)
-        
+                
         self.statusBar().showMessage("Ready")
         # Create once
         self.card_preview_popup = CardPreviewPopup(self)
@@ -440,8 +579,8 @@ class DeckBuilderWindow(QMainWindow):
                 qty_item.setBackground(QColor('#ffcccc'))
             self.collection_table.setItem(row, 4, qty_item)
 
-            # Add button
             add_btn = QPushButton("Add →")
+            add_btn.setEnabled(available > 0 or (card.type_line and 'Basic Land' in (card.type_line or '')))
             add_btn.clicked.connect(lambda checked, c=card: self.add_card_to_deck(c))
             self.collection_table.setCellWidget(row, 5, add_btn)
     
@@ -652,28 +791,36 @@ class DeckBuilderWindow(QMainWindow):
         self.populate_collection_table()  # Refresh available quantities
         self.recommendations_widget.set_deck_and_collection(self.deck, self.collection_cards)
     
+    # Replace get_available_quantity with DB-backed version
     def get_available_quantity(self, card: Card) -> int:
-        """Get available quantity of a card (collection - already in deck)."""
+        """
+        How many more copies can be added to THIS deck right now.
+        Basic lands remain unlimited.
+        """
         # Basic lands are unlimited
-        if card.name in BASIC_LANDS and 'Basic' in (card.type_line or ''):
+        if card.type_line and 'Basic Land' in card.type_line:
             return 999
-    
-        # Count how many are in the current deck
+
+        # Already in this deck
         in_deck = sum(dc.quantity for dc in self.deck.cards if dc.card.id == card.id)
-        return max(0, card.quantity - in_deck)
-    
+
+        # Free stock for this deck (exclude this deck from "used")
+        base_avail = self.db.get_available_quantity_for_deck(card.id, exclude_deck_id=self.deck.id or None)
+
+        # How many more we can add beyond current in-deck copies
+        return max(0, base_avail - in_deck)
+
+   
     def add_card_to_deck(self, card: Card, to_sideboard: bool = False):
-        """Add a card to the deck."""
-        # Basic lands are unlimited
-        is_basic_land = card.name in BASIC_LANDS and 'Basic' in (card.type_line or '')
-    
-        if not is_basic_land:
-            available = self.get_available_quantity(card)
-        
-            if available <= 0:
-                QMessageBox.warning(self, "Unavailable", f"No copies of '{card.name}' available in collection.")
+        # Unlimited basic lands (virtual)
+        is_virtual_basic = (card.type_line or "").find("Basic Land") != -1 and (card.id is None or (isinstance(card.id, int) and card.id < 0))
+        if not is_virtual_basic:
+            # Double-check via DB (robust even if UI available count drifted)
+            exclude_id = self.deck.id if getattr(self.deck, "id", None) else None
+            if not self.db.check_card_availability(card.id, 1, exclude_deck_id=exclude_id):
+                QMessageBox.warning(self, "Unavailable", f"No copies of '{card.name}' left (used in other decks).")
                 return
-    
+
         self.deck.add_card(card, quantity=1, in_sideboard=to_sideboard)
         self.update_all_displays()
         self.statusBar().showMessage(f"Added {card.name} to {'sideboard' if to_sideboard else 'deck'}")
@@ -945,3 +1092,75 @@ class DeckBuilderWindow(QMainWindow):
                 if hasattr(self, "card_preview_popup"):
                     self.card_preview_popup.hide_popup()
         return super().eventFilter(obj, event)
+    
+    def open_ai_generator(self):
+        """Open AI deck generator dialog and run generation in background."""
+        # Ensure collection is loaded
+        try:
+            self.collection_cards = self.db.get_all_cards()
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", f"Could not load collection:\n{e}")
+            return
+        default_format = self.deck.format if self.deck else "standard"
+        default_colors = self.deck.get_colors() if self.deck else []
+        dlg = AIDeckGeneratorDialog(self, default_format=default_format, default_colors=default_colors)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        opts = dlg.get_values()
+        if not self.collection_cards:
+            QMessageBox.warning(self, "No Cards", "Your collection is empty; cannot generate a deck.")
+            return
+        progress = QProgressDialog("Generating deck...", "Cancel", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        availability = {}
+        exclude_id = self.deck.id if getattr(self.deck, "id", None) else None
+        for c in self.collection_cards:
+            if c.id is not None and (not isinstance(c.id, int) or c.id >= 0):
+                availability[c.id] = self.db.get_available_quantity_for_deck(c.id, exclude_deck_id=exclude_id)
+        self._deckgen_worker = DeckGenWorker(
+            collection=self.collection_cards,
+            archetype=opts["archetype"],
+            fmt=opts["format"],
+            colors=opts["colors"],
+            deck_size=opts["deck_size"],
+            auto_select_commander=opts["auto_select_commander"],
+            tribe=opts.get("tribe")  # NEW
+        )
+        self._deckgen_worker.finished.connect(lambda deck: self._on_ai_generation_done(deck, progress))
+        self._deckgen_worker.error.connect(lambda msg: self._on_ai_generation_error(msg, progress))
+        self._deckgen_worker.start()
+
+    def _on_ai_generation_done(self, deck, progress: QProgressDialog):
+        progress.close()
+        self._deckgen_worker = None
+        if not deck:
+            QMessageBox.warning(self, "Generation Failed", "AI did not return a deck.")
+            return
+        # Replace in-memory deck (user can Save after review)
+        self.deck = deck
+        self.name_input.setText(self.deck.name or "Generated Deck")
+        self.format_combo.setCurrentText(self.deck.format or "standard")
+        self.description_text.setPlainText(self.deck.description or "")
+        # Refresh all displays
+        try:
+            # If you have a convenience method
+            self.update_all_displays()  # existing in your codebase
+        except Exception:
+            # Fallback: update individual panels
+            self.update_deck_display()
+            self.update_stats_display()
+            if hasattr(self, "price_widget"): self.price_widget.set_deck(self.deck)
+            if hasattr(self, "color_widget"): self.color_widget.set_deck(self.deck)
+            if hasattr(self, "insights_widget"): self.insights_widget.set_deck(self.deck)
+        if hasattr(self, "recommendations_widget") and hasattr(self, "collection_cards"):
+            self.recommendations_widget.set_deck_and_collection(self.deck, self.collection_cards)
+        QMessageBox.information(self, "Deck Generated",
+                                "✅ AI deck generated. Review it, then click 'Save Deck' to persist.")
+    def _on_ai_generation_error(self, message: str, progress: QProgressDialog):
+        progress.close()
+        self._deckgen_worker = None
+        QMessageBox.critical(self, "AI Generation Error", f"Failed to generate deck:\n{message}")
+    

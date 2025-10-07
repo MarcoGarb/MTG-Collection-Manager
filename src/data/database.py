@@ -394,26 +394,74 @@ class DatabaseManager:
             decks.append(deck)
         return decks
 
-    def delete_deck(self, deck_id: int):
-        """Delete a deck (cards removed by FK cascade)."""
-        assert self.cursor is not None
-        self.cursor.execute("DELETE FROM decks WHERE id = ?", (deck_id,))
-        self.connection.commit()
+        # NEW
+    def get_used_in_decks(self, card_id: int, exclude_deck_id: int | None = None) -> int:
+        """
+        Sum of copies of this card used by all decks, optionally excluding one deck.
+        """
+        if exclude_deck_id is None:
+            self.cursor.execute("""
+                SELECT COALESCE(SUM(quantity), 0) AS used
+                FROM deck_cards
+                WHERE card_id = ?
+            """, (card_id,))
+        else:
+            self.cursor.execute("""
+                SELECT COALESCE(SUM(quantity), 0) AS used
+                FROM deck_cards
+                WHERE card_id = ? AND deck_id != ?
+            """, (card_id, exclude_deck_id))
+        row = self.cursor.fetchone()
+        return row['used'] if row else 0
 
-    def check_card_availability(self, card_id: int, quantity_needed: int) -> bool:
-        """Check if sufficient quantity of a card is available in collection."""
-        assert self.cursor is not None
+    # NEW
+    def get_available_quantity_for_deck(self, card_id: int, exclude_deck_id: int | None = None) -> int:
+        """
+        Maximum copies this deck can still allocate without stealing from others:
+        owned - used_in_other_decks.
+        """
         self.cursor.execute("SELECT quantity FROM cards WHERE id = ?", (card_id,))
         row = self.cursor.fetchone()
         if not row:
-            return False
+            return 0
+        owned = row['quantity'] or 0
+        used_elsewhere = self.get_used_in_decks(card_id, exclude_deck_id=exclude_deck_id)
+        return max(0, owned - used_elsewhere)
 
-        # How many are already used in decks?
-        self.cursor.execute("""
-            SELECT SUM(quantity) as used FROM deck_cards WHERE card_id = ?
-        """, (card_id,))
-        used_row = self.cursor.fetchone()
-        used = used_row['used'] if used_row and used_row['used'] else 0
+    # NEW
+    def get_availability_ledger(self, exclude_deck_id: int | None = None) -> dict[int, int]:
+        """
+        Dict[card_id] = copies free for THIS deck to take (owned - used_elsewhere).
+        """
+        if exclude_deck_id is None:
+            # used across all decks
+            self.cursor.execute("""
+                SELECT c.id AS card_id,
+                    c.quantity - COALESCE(u.used, 0) AS available
+                FROM cards c
+                LEFT JOIN (
+                    SELECT card_id, SUM(quantity) AS used
+                    FROM deck_cards
+                    GROUP BY card_id
+                ) u ON u.card_id = c.id
+            """)
+        else:
+            # used across all other decks
+            self.cursor.execute("""
+                SELECT c.id AS card_id,
+                    c.quantity - COALESCE(u.used, 0) AS available
+                FROM cards c
+                LEFT JOIN (
+                    SELECT card_id, SUM(quantity) AS used
+                    FROM deck_cards
+                    WHERE deck_id != ?
+                    GROUP BY card_id
+                ) u ON u.card_id = c.id
+            """, (exclude_deck_id,))
+        rows = self.cursor.fetchall()
+        return {row['card_id']: max(0, row['available'] or 0) for row in rows}
 
-        available = (row['quantity'] or 0) - used
+    # OPTIONAL: tighten this to use the new helpers (kept for specific one-off checks)
+    def check_card_availability(self, card_id: int, quantity_needed: int, exclude_deck_id: int | None = None) -> bool:
+        available = self.get_available_quantity_for_deck(card_id, exclude_deck_id=exclude_deck_id)
         return available >= quantity_needed
