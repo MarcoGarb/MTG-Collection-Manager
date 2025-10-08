@@ -126,7 +126,7 @@ class AIDeckGeneratorDialog(QDialog):
 class DeckGenWorker(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
-    def __init__(self, collection, archetype, fmt, colors, deck_size, auto_select_commander, tribe=None):
+    def __init__(self, collection, archetype, fmt, colors, deck_size, auto_select_commander, tribe=None, availability_ledger=None):
         super().__init__()
         self.collection = collection
         self.archetype = archetype
@@ -135,6 +135,7 @@ class DeckGenWorker(QThread):
         self.deck_size = deck_size
         self.auto_select_commander = auto_select_commander
         self.tribe = tribe  # NEW
+        self.availability_ledger = availability_ledger
     def run(self):
         try:
             generator = DeckGenerator(self.collection)
@@ -146,6 +147,7 @@ class DeckGenWorker(QThread):
                     commander=None,
                     auto_select_commander=self.auto_select_commander,
                     tribe=self.tribe,  # NEW
+                    availability_ledger=self.availability_ledger
                 )
             else:
                 deck = generator.generate_deck(
@@ -156,6 +158,7 @@ class DeckGenWorker(QThread):
                     commander=None,
                     auto_select_commander=False,
                     tribe=self.tribe,  # NEW
+                    availability_ledger=self.availability_ledger
                 )
             self.finished.emit(deck)
         except Exception as e:
@@ -1120,6 +1123,9 @@ class DeckBuilderWindow(QMainWindow):
         for c in self.collection_cards:
             if c.id is not None and (not isinstance(c.id, int) or c.id >= 0):
                 availability[c.id] = self.db.get_available_quantity_for_deck(c.id, exclude_deck_id=exclude_id)
+        # Build availability ledger for the current deck (exclude this deck if editing)
+        exclude_id = self.deck.id if getattr(self.deck, 'id', None) else None
+        availability_ledger = self.db.get_availability_ledger(exclude_deck_id=exclude_id)
         self._deckgen_worker = DeckGenWorker(
             collection=self.collection_cards,
             archetype=opts["archetype"],
@@ -1127,7 +1133,8 @@ class DeckBuilderWindow(QMainWindow):
             colors=opts["colors"],
             deck_size=opts["deck_size"],
             auto_select_commander=opts["auto_select_commander"],
-            tribe=opts.get("tribe")  # NEW
+            tribe=opts.get("tribe"),  # NEW
+            availability_ledger=availability_ledger
         )
         self._deckgen_worker.finished.connect(lambda deck: self._on_ai_generation_done(deck, progress))
         self._deckgen_worker.error.connect(lambda msg: self._on_ai_generation_error(msg, progress))

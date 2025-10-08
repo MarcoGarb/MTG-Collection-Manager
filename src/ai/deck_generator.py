@@ -251,14 +251,16 @@ class DeckGenerator:
         if format.lower() == 'commander':
             print("🔍 Enforcing singleton rule...")
             best_deck = self._enforce_singleton(best_deck)
-            if availability_ledger:
-                best_deck = self._enforce_availability(
-                    best_deck, availability_ledger, format=format, colors=colors
-                )
             # FINAL land clamp and keep body at 99
             best_deck = self._cap_commander_lands(best_deck, valid_cards, min_lands=35, max_lands=40)
 
-        # 6) Ensure a sensible land base EVEN IF collection lacked basics (this was unreachable before)
+        # 6) Enforce availability ledger for ALL formats (not just commander)
+        if availability_ledger:
+            best_deck = self._enforce_availability(
+                best_deck, availability_ledger, format=format, colors=colors
+            )
+
+        # 7) Ensure a sensible land base EVEN IF collection lacked basics (this was unreachable before)
         try:
             self._ensure_land_base(best_deck, colors or [], format, archetype, deck_size)
         except Exception:
