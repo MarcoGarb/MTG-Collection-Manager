@@ -52,7 +52,6 @@ egg-info/
 
 # Local data and large runtime assets (don't upload card images or local DBs)
 # If you need to include small sample data for the project, add a dedicated `data/sample/` and track that instead.
-data/card_images/
 data/*.jpg
 data/*.jpeg
 data/*.png
