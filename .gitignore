@@ -56,7 +56,12 @@ data/*.jpg
 data/*.jpeg
 data/*.png
 data/collection.db
-data/*.db
+data/card_images/*.db
+data/card_images/*.jpg
+data/card_images/*.jpeg
+data/card_images/*.png
+data/card_images/collection.db
+data/card_images/*.db
 
 # Files created by the EXE/build process
 MTG-Collection-Manager.exe
