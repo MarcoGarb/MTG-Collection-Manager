@@ -1,3 +1,70 @@
+# .gitignore for MTG-Collection-Manager
+# Purpose: keep build artifacts, virtualenvs, IDE metadata, and large runtime data out of GitHub
+
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+.build_env/
+
+# Build / distribution
+dist/
+build/
+*.egg-info/
+pip-wheel-metadata/
+*.whl
+*.exe
+
+# PyInstaller
+*.spec
+
+# Logs and reports
+*.log
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Editor directories and files
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+
+# Python packaging
+dist/
+build/
+egg-info/
+
+# Local data and large runtime assets (don't upload card images or local DBs)
+# If you need to include small sample data for the project, add a dedicated `data/sample/` and track that instead.
+data/card_images/
+data/*.jpg
+data/*.jpeg
+data/*.png
+data/collection.db
+data/*.db
+
+# Files created by the EXE/build process
+MTG-Collection-Manager.exe
+*.manifest
+
+# If you need to keep any of these files in the repo, add an exception in a tracked .gitignore or
+# add a small placeholder file (e.g. data/.gitkeep) and commit that instead.
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
