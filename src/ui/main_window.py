@@ -18,6 +18,7 @@ from src.ui.filter_panel import FilterPanel
 from PyQt5.QtGui import QColor
 from src.ui.deck_builder_window import DeckBuilderWindow
 from src.ui.deck_list_dialog import DeckListDialog
+from src.ui.cube_builder_window import CubeBuilderWindow
 from src.ui.widgets.card_preview_popup import CardPreviewPopup
 
 class MainWindow(QMainWindow):
@@ -101,6 +102,12 @@ class MainWindow(QMainWindow):
         deck_builder_btn.setStyleSheet("font-weight: bold; font-size: 12px;")
         deck_builder_btn.clicked.connect(self.open_deck_builder)
         controls_layout.addWidget(deck_builder_btn)
+        
+        # Cube Builder button
+        cube_builder_btn = QPushButton("🎲 Cube Builder")
+        cube_builder_btn.setStyleSheet("font-weight: bold; font-size: 12px;")
+        cube_builder_btn.clicked.connect(self.open_cube_builder)
+        controls_layout.addWidget(cube_builder_btn)
 
         # Filter toggle button (this should already exist)
         self.filter_toggle_btn = QPushButton("Show Filters")
@@ -519,6 +526,16 @@ class MainWindow(QMainWindow):
     def on_deck_saved(self, deck):
         """Handle deck saved signal."""
         QMessageBox.information(self, "Success", f"Deck '{deck.name}' saved successfully!")
+
+    def open_cube_builder(self):
+        """Open the cube builder window."""
+        builder = CubeBuilderWindow(self.db, parent=self)
+        builder.cube_saved.connect(self.on_cube_saved)
+        builder.show()
+
+    def on_cube_saved(self, cube):
+        """Handle cube saved signal."""
+        QMessageBox.information(self, "Success", f"Cube '{cube.name}' saved successfully!")
 
     def closeEvent(self, event):
         """Handle window close event."""
