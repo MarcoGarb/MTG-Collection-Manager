@@ -91,6 +91,13 @@ class DeckGenerator:
             'creatures': 0.60,  # 60% creatures
             'removal': 0.15,
             'other': 0.05,
+            'artifacts': 0.20,  # 20% artifacts for equipment and aggressive artifacts
+            'artifact_weights': {
+                'equipment': 0.9,  # Very high priority for equipment in aggro
+                'mana_rocks': 0.2,  # Very low priority for mana rocks (too slow)
+                'utility': 0.3,  # Low priority for utility artifacts
+                'combo_pieces': 0.1,  # Very low priority for combo artifacts
+            }
         },
         'midrange': {
             'curve': {1: 4, 2: 10, 3: 12, 4: 10, 5: 6, 6: 2},
@@ -98,6 +105,13 @@ class DeckGenerator:
             'creatures': 0.45,
             'removal': 0.20,
             'other': 0.15,
+            'artifacts': 0.20,  # 20% artifacts for value and utility
+            'artifact_weights': {
+                'equipment': 0.7,  # High priority for equipment
+                'mana_rocks': 0.8,  # Very high priority for mana rocks
+                'utility': 0.9,  # Very high priority for utility artifacts
+                'combo_pieces': 0.5,  # Medium priority for combo pieces
+            }
         },
         'control': {
             'curve': {1: 2, 2: 8, 3: 8, 4: 10, 5: 8, 6: 4},
@@ -105,6 +119,13 @@ class DeckGenerator:
             'creatures': 0.15,
             'removal': 0.30,
             'other': 0.25,
+            'artifacts': 0.30,  # 30% artifacts for card advantage and control
+            'artifact_weights': {
+                'equipment': 0.3,  # Low priority for equipment
+                'mana_rocks': 0.95,  # Very high priority for mana rocks
+                'utility': 0.95,  # Very high priority for utility artifacts
+                'combo_pieces': 0.7,  # High priority for combo pieces
+            }
         },
         'combo': {
             'curve': {1: 8, 2: 12, 3: 8, 4: 6, 5: 4, 6: 2},
@@ -112,14 +133,56 @@ class DeckGenerator:
             'creatures': 0.25,
             'removal': 0.10,
             'other': 0.45,
+            'artifacts': 0.20,  # 20% artifacts for combo pieces and acceleration
+            'artifact_weights': {
+                'equipment': 0.2,  # Very low priority for equipment
+                'mana_rocks': 0.9,  # Very high priority for mana rocks
+                'utility': 0.6,  # Medium priority for utility artifacts
+                'combo_pieces': 0.98,  # Very high priority for combo pieces
+            }
         },
         'tribal': {
-        'curve': {1: 6, 2: 10, 3: 12, 4: 8, 5: 4, 6: 2},
-        'lands': 24,
-        'creatures': 0.55,
-        'removal': 0.15,
-        'other': 0.15,
-    },
+            'curve': {1: 6, 2: 10, 3: 12, 4: 8, 5: 4, 6: 2},
+            'lands': 24,
+            'creatures': 0.55,
+            'removal': 0.15,
+            'other': 0.15,
+            'artifacts': 0.15,  # 15% artifacts for tribal support
+            'artifact_weights': {
+                'equipment': 0.8,  # High priority for equipment (tribal lords)
+                'mana_rocks': 0.5,  # Medium priority for mana rocks
+                'utility': 0.7,  # High priority for utility artifacts
+                'combo_pieces': 0.4,  # Medium priority for combo pieces
+            }
+        },
+        'artifact_aggro': {
+            'curve': {1: 10, 2: 12, 3: 8, 4: 6, 5: 2, 6: 0},
+            'lands': 18,
+            'creatures': 0.40,
+            'removal': 0.10,
+            'other': 0.10,
+            'artifacts': 0.40,  # 40% artifacts for artifact aggro
+            'artifact_weights': {
+                'equipment': 0.95,  # Very high priority for equipment
+                'mana_rocks': 0.3,  # Low priority for mana rocks
+                'utility': 0.6,  # Medium priority for utility artifacts
+                'combo_pieces': 0.4,  # Medium priority for combo pieces
+            }
+        },
+        'artifact_combo': {
+            'curve': {1: 6, 2: 10, 3: 8, 4: 8, 5: 6, 6: 4},
+            'lands': 22,
+            'creatures': 0.20,
+            'removal': 0.05,
+            'other': 0.15,
+            'artifacts': 0.60,  # 60% artifacts for artifact combo
+            'artifact_weights': {
+                'equipment': 0.3,  # Low priority for equipment
+                'mana_rocks': 0.9,  # Very high priority for mana rocks
+                'utility': 0.8,  # High priority for utility artifacts
+                'combo_pieces': 0.98,  # Very high priority for combo pieces
+            }
+        },
     }
     
     def __init__(self, collection: List[Card]):
@@ -127,6 +190,80 @@ class DeckGenerator:
         self.analyzer = DeckAnalyzer()
         self._target_tribe: Optional[str] = None  # NEW
     
+    def _classify_artifact(self, card: Card) -> str:
+        """Classify an artifact card into categories for archetype weighting."""
+        if not card.type_line or 'Artifact' not in card.type_line:
+            return 'non_artifact'
+        
+        text = (card.oracle_text or '').lower()
+        name = (card.name or '').lower()
+        type_line = card.type_line.lower()
+        
+        # Equipment artifacts
+        if 'equipment' in type_line or 'equip' in text:
+            return 'equipment'
+        
+        # Mana rocks (artifacts that produce mana)
+        mana_keywords = ['add', 'mana', 'tap:', 'untap', 'produce', 'taps for']
+        mana_indicators = ['{t}', 'tap', 'untap', 'add {', 'produce']
+        # Exclude sacrifice-based mana generation (combo pieces)
+        if (any(keyword in text for keyword in mana_keywords) and 
+            any(indicator in text for indicator in mana_indicators) and
+            'sacrifice' not in text):
+            return 'mana_rocks'
+        
+        # Combo pieces (artifacts with specific combo potential)
+        combo_keywords = ['sacrifice', 'when', 'enters', 'leaves', 'dies', 'counter', 'charge', 'whenever', 'if you do']
+        combo_indicators = ['enters the battlefield', 'leaves the battlefield', 'when you', 'whenever you', 'if you control']
+        if (any(keyword in text for keyword in combo_keywords) or 
+            any(indicator in text for indicator in combo_indicators)) and len(text) > 30:
+            return 'combo_pieces'
+        
+        # Utility artifacts (everything else)
+        return 'utility'
+    
+    def _get_artifact_weight(self, card: Card, archetype: str) -> float:
+        """Get the weight for an artifact card based on archetype."""
+        if archetype not in self.ARCHETYPE_TEMPLATES:
+            return 1.0
+        
+        artifact_type = self._classify_artifact(card)
+        if artifact_type == 'non_artifact':
+            return 1.0
+        
+        template = self.ARCHETYPE_TEMPLATES[archetype]
+        artifact_weights = template.get('artifact_weights', {})
+        return artifact_weights.get(artifact_type, 0.5)
+    
+    def _evaluate_artifact_quality(self, mainboard: List, archetype: str) -> float:
+        """Evaluate the quality of artifacts in the deck based on archetype preferences."""
+        if archetype not in self.ARCHETYPE_TEMPLATES:
+            return 0.0
+        
+        template = self.ARCHETYPE_TEMPLATES[archetype]
+        artifact_weights = template.get('artifact_weights', {})
+        
+        quality_score = 0.0
+        artifact_count = 0
+        
+        for dc in mainboard:
+            if not (dc.card.type_line and 'Artifact' in dc.card.type_line):
+                continue
+            
+            artifact_type = self._classify_artifact(dc.card)
+            if artifact_type == 'non_artifact':
+                continue
+            
+            weight = artifact_weights.get(artifact_type, 0.5)
+            quality_score += weight * dc.quantity
+            artifact_count += dc.quantity
+        
+        if artifact_count == 0:
+            return 0.0
+        
+        # Normalize by artifact count and scale
+        avg_quality = quality_score / artifact_count
+        return min(20, avg_quality * 20)  # Scale to 0-20 points
     
     def _filter_by_colors(self, colors: List[str]) -> List[Card]:
         """
@@ -668,11 +805,27 @@ class DeckGenerator:
         lands = [c for c in card_pool if c.is_land()]
         nonlands = [c for c in card_pool if not c.is_land()]
 
-        # Add nonlands first
-        random.shuffle(nonlands)
+        # Add nonlands first with artifact weighting
+        # Separate artifacts and non-artifacts
+        artifacts = [c for c in nonlands if c.type_line and 'Artifact' in c.type_line]
+        other_nonlands = [c for c in nonlands if not (c.type_line and 'Artifact' in c.type_line)]
+        
+        # Weight artifacts based on archetype
+        weighted_artifacts = []
+        for card in artifacts:
+            weight = self._get_artifact_weight(card, archetype)
+            # Add multiple copies based on weight
+            copies = max(1, int(weight * 3))  # Scale weight to 1-3 copies
+            for _ in range(copies):
+                weighted_artifacts.append(card)
+        
+        # Combine weighted artifacts with other nonlands
+        all_nonlands = weighted_artifacts + other_nonlands
+        random.shuffle(all_nonlands)
+        
         added_nonlands = 0
         commander_id = commander.id if commander else None
-        for card in nonlands:
+        for card in all_nonlands:
             if added_nonlands >= target_nonlands:
                 break
             qty = 1 if is_commander else random.randint(1, 4)
@@ -784,6 +937,17 @@ class DeckGenerator:
             ideal_creature_ratio = template['creatures']
             creature_score = max(0, 20 - abs(creature_ratio - ideal_creature_ratio) * 100)
             score += creature_score
+            
+            # Artifact scoring based on archetype
+            artifact_ratio = card_types.get('artifact', 0) / total_nonlands
+            ideal_artifact_ratio = template.get('artifacts', 0.0)
+            if ideal_artifact_ratio > 0:
+                artifact_score = max(0, 15 - abs(artifact_ratio - ideal_artifact_ratio) * 50)
+                score += artifact_score
+                
+                # Bonus for artifact quality based on archetype
+                artifact_quality_score = self._evaluate_artifact_quality(mainboard, archetype)
+                score += artifact_quality_score
         
         # Synergy scoring
         themes = analysis['themes']
@@ -901,59 +1065,45 @@ class DeckGenerator:
         return deck
     
     def _ensure_land_base(self, deck: Deck, colors: List[str], fmt: str, archetype: str, deck_size: int):
-        """Add/adjust basic lands to hit target land count, even if none in collection."""
         target = _target_land_count(fmt, archetype, deck_size)
         mainboard = deck.get_mainboard_cards()
         land_count = sum(dc.quantity for dc in mainboard if dc.card.is_land())
-        need = max(0, target - land_count)
-        if need == 0 and sum(dc.quantity for dc in mainboard if not dc.is_commander) == deck_size:
+        # Remove surplus lands if exceeding target
+        if land_count > target:
+            excess = land_count - target
+            for dc in sorted([d for d in mainboard if d.card.is_land()],
+                            key=lambda d: 0 if (d.card.is_land() and 'Basic Land' in (d.card.type_line or '')) else 1):
+                if excess <= 0:
+                    break
+                reducible = min(excess, dc.quantity - 1)
+                if reducible > 0:
+                    deck.remove_card(dc.card, quantity=reducible)
+                    excess -= reducible
             return
-        # If we need to add lands but deck is already full, free slots from the end (nonlands)
+        # Add only if below the target
+        need = max(0, target - land_count)
+        if need == 0:
+            return
+        # If need to add lands but deck is already full, remove from nonlands first
         current_size = sum(dc.quantity for dc in mainboard if not dc.is_commander)
         if current_size + need > deck_size:
             to_remove = min(need, (current_size + need) - deck_size)
-            # Remove from nonlands one by one
             for dc in list(reversed(mainboard)):
                 if to_remove <= 0: break
                 if dc.card.is_land() or dc.is_commander: continue
                 remove_now = min(dc.quantity, to_remove)
                 deck.remove_card(dc.card, quantity=remove_now, from_sideboard=False)
                 to_remove -= remove_now
-        # Recompute remaining slots and need
+        # Now actually add basics if still needed
         mainboard = deck.get_mainboard_cards()
         land_count = sum(dc.quantity for dc in mainboard if dc.card.is_land())
-        current_size = sum(dc.quantity for dc in mainboard if not dc.is_commander)
-        need = min(target - land_count, max(0, deck_size - current_size))
-        if need <= 0:
-            return
-        # Compute colored pip mix → basic mix
-        pips = _count_color_pips(deck)
-        mix = _color_mix_from_pips(pips, colors)
-        if not mix:
-            # Fallback: even split by deck colors, else default to one colorless
-            if colors:
-                even = 1.0 / len(colors)
-                mix = {c: even for c in colors}
-            else:
-                mix = {'C': 1.0}
-        # Allocate counts per color
-        allocations = {}
-        remaining = need
-        for i, (c, prop) in enumerate(mix.items()):
-            count = int(round(prop * need))
-            if i == len(mix) - 1:
-                count = remaining  # force total to match
-            allocations[c] = max(0, count)
-            remaining -= allocations[c]
-        # Add basics according to allocation
-        for c, cnt in allocations.items():
-            if cnt <= 0: continue
-            name = _basic_for_color(c)
-            basic = _make_basic_land(name)
-            deck.add_card(basic, quantity=cnt)
-    
+        need = min(target - land_count, max(0, deck_size - sum(dc.quantity for dc in mainboard if not dc.is_commander)))
+        if need > 0:
+            self._add_basic_lands(deck, need, colors)
+
     def _is_basic_land(self, card: Card) -> bool:
         return bool(card.type_line and 'Basic Land' in card.type_line)
+    
     def _basic_for_color(self, color: str) -> str:
         return {
             'W': 'Plains',
@@ -962,55 +1112,51 @@ class DeckGenerator:
             'R': 'Mountain',
             'G': 'Forest'
         }.get(color, 'Wastes')
+    
     def _add_basic_lands(self, deck: Deck, count: int, colors: List[str]) -> None:
         if not colors:
             colors = ['C']
-        # Spread basics across colors roughly evenly
-        per_color = max(1, count // max(1, len(colors)))
-        remaining = count
+        # Count how many basics are already present
+        current_basics = sum(
+            dc.quantity for dc in deck.get_mainboard_cards()
+            if dc.card.is_land() and 'Basic Land' in (dc.card.type_line or '')
+        )
+        # Only add what is truly needed
+        to_add_total = max(0, count - current_basics)
+        if to_add_total == 0:
+            return
+        per_color = max(1, to_add_total // max(1, len(colors)))
+        remaining = to_add_total
         for c in colors:
             if remaining <= 0: break
             to_add = min(per_color, remaining)
             name = self._basic_for_color(c)
-            # find an actual card object in collection or synthesize a virtual basic
             basics = [card for card in self.collection
-                    if card.name == name and self._is_basic_land(card)]
+                    if card.name == name and card.is_land() and 'Basic Land' in (card.type_line or '')]
             if basics:
                 deck.add_card(basics[0], quantity=to_add)
             else:
-                # last-resort virtual basic; use _make_basic_land to ensure required fields
                 deck.add_card(_make_basic_land(name), quantity=to_add)
             remaining -= to_add
         # Any remainder -> dump into first color
         if remaining > 0:
             name = self._basic_for_color(colors[0])
             basics = [card for card in self.collection
-                    if card.name == name and self._is_basic_land(card)]
+                    if card.name == name and card.is_land() and 'Basic Land' in (card.type_line or '')]
             if basics:
                 deck.add_card(basics[0], quantity=remaining)
             else:
                 deck.add_card(_make_basic_land(name), quantity=remaining)
 
     def _ensure_min_deck_size(self, deck: Deck, fmt: str, min_mainboard: int, card_pool: List[Card]) -> Deck:
-        """Ensure deck mainboard has at least min_mainboard cards.
-
-        Strategy:
-        - Fill with available nonland cards from the card_pool (prefer new cards not already in deck).
-        - If still short, add basic lands distributed by deck colors.
-        - Respect commander singleton behavior (don't add duplicates in commander mainboard).
-        """
         try:
             current_mb = sum(dc.quantity for dc in deck.get_mainboard_cards())
             if current_mb >= min_mainboard:
                 return deck
-
             need = min_mainboard - current_mb
-
-            # Build a set of existing mainboard non-commander ids
             existing_ids = {dc.card.id for dc in deck.get_mainboard_cards() if not dc.is_commander}
             is_commander = fmt == 'commander'
-
-            # Prefer nonlands from the provided pool
+            # Prefer nonlands from pool
             for card in card_pool:
                 if need <= 0:
                     break
@@ -1018,25 +1164,17 @@ class DeckGenerator:
                     continue
                 if is_commander and card.id in existing_ids:
                     continue
-                # Add one copy (safe and conservative)
                 deck.add_card(card, quantity=1)
                 existing_ids.add(card.id)
                 need -= 1
-
-            # If still need cards, add basics
+            # If still short, add basic lands
             if need > 0:
                 colors = deck.get_colors() or []
-                # If commander and no commander present, try to preserve behavior
-                if is_commander and not deck.get_commander():
-                    # nothing we can do here automatically; just add basics
-                    pass
                 self._add_basic_lands(deck, need, colors)
-
         except Exception as exc:
-            # Keep generation robust — swallow issues here but log
             print(f"⚠️ _ensure_min_deck_size failed: {exc}")
-
         return deck
+
     def _enforce_availability(self, deck: Deck, ledger: Dict[int,int], format: str, colors: List[str]) -> Deck:
         """
         Clamp deck to not exceed availability_ledger.

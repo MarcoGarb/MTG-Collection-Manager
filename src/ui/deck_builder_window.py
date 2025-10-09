@@ -41,7 +41,10 @@ class AIDeckGeneratorDialog(QDialog):
         # Archetype
         layout.addWidget(QLabel("Archetype:"))
         self.archetype_combo = QComboBox()
-        self.archetype_combo.addItems(["aggro", "midrange", "control", "combo", "tribal"])
+        self.archetype_combo.addItems([
+            "aggro", "midrange", "control", "combo", "tribal", 
+            "artifact_aggro", "artifact_combo"
+        ])
         self.archetype_combo.setCurrentText("midrange")
         layout.addWidget(self.archetype_combo)
         # Format
