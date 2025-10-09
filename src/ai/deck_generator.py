@@ -267,9 +267,79 @@ class DeckGenerator:
             # Never let land-base adjustment break generation
             pass
 
+        # 8) Ensure deck meets format minimum card counts (fill with nonlands then basics)
+        try:
+            fmt_l = (format or '').lower()
+            # Prefer format rules min_cards if available, else use deck_size
+            min_req = Deck.FORMAT_RULES.get(fmt_l, {}).get('min_cards', deck_size)
+            # For commander, min_cards is typically 100 (including commander)
+            self._ensure_min_deck_size(best_deck, fmt_l, min_req, valid_cards)
+        except Exception:
+            # Don't let this break generation
+            pass
+
+        # 9) Enforce copy limits (e.g., max 4 copies) to avoid invalid decks like >4 copies
+        try:
+            max_copies = Deck.FORMAT_RULES.get((format or '').lower(), {}).get('max_copies', None)
+            if max_copies and max_copies > 0:
+                self._enforce_copy_limits(best_deck, max_copies, valid_cards, format=(format or '').lower())
+        except Exception:
+            pass
+
+        # If Commander format, ensure there are no duplicate copies of the commander card
+        try:
+            if (format or '').lower() == 'commander':
+                self._ensure_single_commander_copy(best_deck)
+        except Exception:
+            pass
+
+        # FINAL: ensure deck still meets format minimums after all post-processing (copy clamping etc.)
+        try:
+            fmt_l = (format or '').lower()
+            min_req = Deck.FORMAT_RULES.get(fmt_l, {}).get('min_cards', deck_size)
+            # valid_cards should be available from earlier; fall back to full collection
+            pool = valid_cards if 'valid_cards' in locals() else self.collection
+            self._ensure_min_deck_size(best_deck, fmt_l, min_req, pool)
+        except Exception:
+            pass
+
         best_deck.update_colors()
         best_deck.date_modified = datetime.now().isoformat()
         return best_deck
+
+    def _ensure_single_commander_copy(self, deck: Deck) -> Deck:
+        """Remove any non-commander copies of the commander so only the commander entry remains."""
+        try:
+            commander_dc = deck.get_commander()
+            if not commander_dc:
+                return deck
+            commander_id = commander_dc.card.id
+
+            # Remove any non-commander deck entries with same id
+            new_cards = []
+            for dc in deck.cards:
+                if dc.is_commander:
+                    new_cards.append(dc)
+                else:
+                    if getattr(dc.card, 'id', None) == commander_id:
+                        # skip duplicate non-commander copy
+                        continue
+                    new_cards.append(dc)
+
+            deck.cards = new_cards
+        except Exception as exc:
+            print(f"⚠️ _ensure_single_commander_copy failed: {exc}")
+        # If removal caused deck to drop below commander minimum, top up with basics
+        try:
+            min_cards = Deck.FORMAT_RULES.get('commander', {}).get('min_cards', 100)
+            current_mb = deck.mainboard_count()
+            if current_mb < min_cards:
+                to_add = min_cards - current_mb
+                colors = deck.get_colors() or []
+                self._add_basic_lands(deck, to_add, colors)
+        except Exception:
+            pass
+        return deck
 
     def _find_suitable_commanders(self, card_pool: List[Card], colors: List[str]) -> List[Card]:
         """Find suitable commanders from the card pool."""
@@ -309,27 +379,32 @@ class DeckGenerator:
         # Separate cards by type
         singleton_cards = []
         basic_lands = []
-        seen_ids = set()
-    
+        seen_names = set()
+
         for dc in all_cards:
             # Skip commander - we'll add it back separately
             if dc.is_commander:
                 continue
-        
+            # Also skip any card that is the commander (same id) to avoid duplicate copies
+            if commander_dc and dc.card.id == commander_dc.card.id:
+                continue
+
             is_basic = dc.card.type_line and 'Basic Land' in dc.card.type_line
-        
+
             if is_basic:
                 # Keep basic lands (can have multiple copies)
                 basic_lands.append(dc)
-            elif dc.card.id not in seen_ids:
-                # Enforce singleton for non-basic cards
-                singleton_cards.append(DeckCard(
-                    card=dc.card,
-                    quantity=1,
-                    is_commander=False,
-                    in_sideboard=False
-                ))
-                seen_ids.add(dc.card.id)
+            else:
+                # Use card name (normalized) to enforce singleton across printings
+                name = (dc.card.name or '').strip().lower()
+                if name and name not in seen_names:
+                    singleton_cards.append(DeckCard(
+                        card=dc.card,
+                        quantity=1,
+                        is_commander=False,
+                        in_sideboard=False
+                    ))
+                    seen_names.add(name)
     
         # Calculate current size (excluding commander)
         current_size = len(singleton_cards) + sum(dc.quantity for dc in basic_lands)
@@ -596,6 +671,7 @@ class DeckGenerator:
         # Add nonlands first
         random.shuffle(nonlands)
         added_nonlands = 0
+        commander_id = commander.id if commander else None
         for card in nonlands:
             if added_nonlands >= target_nonlands:
                 break
@@ -603,9 +679,9 @@ class DeckGenerator:
             qty = min(qty, target_nonlands - added_nonlands)
             if qty <= 0:
                 continue
-
-            if is_commander and any(dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander):
-                continue  # singleton
+            # If this is a commander deck, avoid adding the commander card as a non-commander copy
+            if is_commander and commander_id is not None and card.id == commander_id:
+                continue
             deck.add_card(card, quantity=qty)
             added_nonlands += qty
 
@@ -640,7 +716,7 @@ class DeckGenerator:
             for card in nonlands:
                 if remaining <= 0:
                     break
-                if is_commander and any(dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander):
+                if is_commander and commander_id is not None and card.id == commander_id:
                     continue
                 qty = 1 if is_commander else min(2, remaining)
                 deck.add_card(card, quantity=qty)
@@ -652,9 +728,7 @@ class DeckGenerator:
                     if remaining <= 0:
                         break
                     is_basic = ('Basic Land' in (card.type_line or ''))
-                    if is_commander and not is_basic and any(
-                        dc.card.id == card.id for dc in deck.get_mainboard_cards() if not dc.is_commander
-                    ):
+                    if is_commander and commander_id is not None and not is_basic and card.id == commander_id:
                         continue
                     qty = 1 if (is_commander and not is_basic) else min(2, remaining)
                     deck.add_card(card, quantity=qty)
@@ -904,10 +978,8 @@ class DeckGenerator:
             if basics:
                 deck.add_card(basics[0], quantity=to_add)
             else:
-                # last-resort virtual basic; your codebase already supports virtual basics elsewhere
-                deck.add_card(Card(name=name, type_line=f"Basic Land — {name}",
-                                colors='', color_identity=c, mana_cost='', cmc=0.0, quantity=999, id=-hash(name)),
-                            quantity=to_add)
+                # last-resort virtual basic; use _make_basic_land to ensure required fields
+                deck.add_card(_make_basic_land(name), quantity=to_add)
             remaining -= to_add
         # Any remainder -> dump into first color
         if remaining > 0:
@@ -917,9 +989,54 @@ class DeckGenerator:
             if basics:
                 deck.add_card(basics[0], quantity=remaining)
             else:
-                deck.add_card(Card(name=name, type_line=f"Basic Land — {name}",
-                                colors='', color_identity=colors[0], mana_cost='', cmc=0.0, quantity=999, id=-hash(name)),
-                            quantity=remaining)
+                deck.add_card(_make_basic_land(name), quantity=remaining)
+
+    def _ensure_min_deck_size(self, deck: Deck, fmt: str, min_mainboard: int, card_pool: List[Card]) -> Deck:
+        """Ensure deck mainboard has at least min_mainboard cards.
+
+        Strategy:
+        - Fill with available nonland cards from the card_pool (prefer new cards not already in deck).
+        - If still short, add basic lands distributed by deck colors.
+        - Respect commander singleton behavior (don't add duplicates in commander mainboard).
+        """
+        try:
+            current_mb = sum(dc.quantity for dc in deck.get_mainboard_cards())
+            if current_mb >= min_mainboard:
+                return deck
+
+            need = min_mainboard - current_mb
+
+            # Build a set of existing mainboard non-commander ids
+            existing_ids = {dc.card.id for dc in deck.get_mainboard_cards() if not dc.is_commander}
+            is_commander = fmt == 'commander'
+
+            # Prefer nonlands from the provided pool
+            for card in card_pool:
+                if need <= 0:
+                    break
+                if card.is_land():
+                    continue
+                if is_commander and card.id in existing_ids:
+                    continue
+                # Add one copy (safe and conservative)
+                deck.add_card(card, quantity=1)
+                existing_ids.add(card.id)
+                need -= 1
+
+            # If still need cards, add basics
+            if need > 0:
+                colors = deck.get_colors() or []
+                # If commander and no commander present, try to preserve behavior
+                if is_commander and not deck.get_commander():
+                    # nothing we can do here automatically; just add basics
+                    pass
+                self._add_basic_lands(deck, need, colors)
+
+        except Exception as exc:
+            # Keep generation robust — swallow issues here but log
+            print(f"⚠️ _ensure_min_deck_size failed: {exc}")
+
+        return deck
     def _enforce_availability(self, deck: Deck, ledger: Dict[int,int], format: str, colors: List[str]) -> Deck:
         """
         Clamp deck to not exceed availability_ledger.
@@ -965,10 +1082,58 @@ class DeckGenerator:
             deck.cards.append(DeckCard(card=commander_dc.card, quantity=1, is_commander=True))
         for dc in pruned:
             deck.cards.append(dc)
-        # Fill any shortage with basic lands
+        # Fill any shortage with basic lands for all formats (not just commander)
         current_size = sum(dc.quantity for dc in deck.get_mainboard_cards() if not dc.is_commander)
-        if is_commander and current_size < target:
+        if current_size < target:
             shortage = target - current_size
-            print(f"🧩 Filling commander shortage with basics: {shortage}")
+            print(f"🧩 Filling shortage with basics: {shortage}")
             self._add_basic_lands(deck, shortage, colors or deck.get_colors())
+        return deck
+    def _enforce_copy_limits(self, deck: Deck, max_copies: int, card_pool: List[Card], format: str = 'standard') -> Deck:
+        """Ensure no non-basic card exceeds max_copies for the format. Fill any removed slots."""
+        try:
+            # Build new mainboard preserving basics and commanders
+            commander_dc = deck.get_commander()
+            main = [dc for dc in deck.get_mainboard_cards() if not dc.is_commander]
+
+            new_main = []
+            removed_slots = 0
+            for dc in main:
+                if self._is_basic_land(dc.card):
+                    new_main.append(dc)
+                    continue
+                # Cap copies
+                if dc.quantity > max_copies:
+                    removed_slots += (dc.quantity - max_copies)
+                    dc.quantity = max_copies
+                if dc.quantity > 0:
+                    new_main.append(dc)
+
+            # Rebuild deck.cards
+            deck.cards = []
+            if commander_dc:
+                deck.cards.append(DeckCard(card=commander_dc.card, quantity=1, is_commander=True))
+            deck.cards.extend(new_main)
+
+            # If we removed slots, try to fill with nonlands from pool
+            if removed_slots > 0:
+                existing_ids = {dc.card.id for dc in deck.get_mainboard_cards() if not dc.is_commander}
+                for card in card_pool:
+                    if removed_slots <= 0:
+                        break
+                    if card.is_land():
+                        continue
+                    if card.id in existing_ids:
+                        continue
+                    deck.add_card(card, quantity=1)
+                    existing_ids.add(card.id)
+                    removed_slots -= 1
+
+                # If still need slots, add basics
+                if removed_slots > 0:
+                    colors = deck.get_colors() or []
+                    self._add_basic_lands(deck, removed_slots, colors)
+
+        except Exception as exc:
+            print(f"⚠️ _enforce_copy_limits failed: {exc}")
         return deck
